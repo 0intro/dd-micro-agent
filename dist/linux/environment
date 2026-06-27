@@ -1,0 +1,6 @@
+# Read by datadog-agent.service (EnvironmentFile). Keep the API key here, not in
+# datadog.yaml, and keep this file mode 0640 owned by root:dd-agent so it stays
+# out of the world-readable yaml. setup.sh writes the real one from the key you
+# pass it. This template is for manual installs.
+DD_API_KEY=REPLACE_WITH_YOUR_API_KEY
+# DD_SITE=datadoghq.com

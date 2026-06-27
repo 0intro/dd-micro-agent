@@ -1,0 +1,18 @@
+# Minimal dd-micro-agent configuration: metrics, logs, and host metadata.
+#
+# Deploy as /etc/datadog-agent/datadog.yaml, with log sources under
+# /etc/datadog-agent/conf.d (see conf.d/app.d/conf.yaml).
+
+api_key: <YOUR_API_KEY>   # or leave blank and set the DD_API_KEY environment variable
+site: datadoghq.com
+
+# Attached to every metric, every log, and to the host itself.
+tags:
+  - env:prod
+
+# Metrics: DogStatsD (UDP :8125) and host system metrics are collected by default.
+# Host metadata (the Infrastructure List) is also on by default, shown explicitly:
+enable_metadata_collection: true
+
+# Logs: off by default. Enable here and declare file sources in conf.d.
+logs_enabled: true

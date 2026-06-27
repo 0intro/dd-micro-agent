@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: goimports
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          out="$(goimports -l -local github.com/0intro/dd-micro-agent .)"
+          if [ -n "$out" ]; then
+            echo "not goimports-clean, run 'make fmt' and commit:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: build
+        run: make build
+      - name: test
+        run: make test
+      - name: profiling proxy (keyless, no network)
+        run: e2e/profiling_local.sh
+      - name: journald tailer (keyless, no network)
+        run: e2e/journald_local.sh
+      - name: dual-shipping (keyless, no network)
+        run: e2e/dualship.sh
+
+  race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '1' # the race detector links the C runtime, and gcc is preinstalled
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: race
+        run: make race
+
+  cross-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: openbsd, goarch: amd64 }
+          - { goos: netbsd, goarch: amd64 }
+          - { goos: dragonfly, goarch: amd64 }
+          - { goos: plan9, goarch: '386' }
+          - { goos: plan9, goarch: amd64 }
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: cross build ${{ matrix.goos }}/${{ matrix.goarch }}
+        run: go build ./...

@@ -1,0 +1,29 @@
+# Example datadog.yaml for dd-micro-agent.
+# Only the keys below are read (apm_config and process_config enable the opt-in
+# profiling proxy and Live Processes). Every other key is ignored, so this works
+# as a drop-in subset of a full Agent config.
+
+api_key: REPLACE_WITH_YOUR_API_KEY
+site: datadoghq.com
+
+# Reported with every metric and log. Leave hostname blank to auto-detect
+# (cloud metadata, then the OS hostname).
+hostname: ""
+tags:
+  - env:prod
+  - team:platform
+
+# DogStatsD intake.
+dogstatsd_port: 8125
+dogstatsd_non_local_traffic: false
+# dogstatsd_socket: /var/run/datadog/dsd.socket
+
+# Logs. Sources are declared per-integration under conf.d (see conf.d/).
+logs_enabled: true
+logs_config:
+  batch_wait: 5
+  batch_max_size: 1000
+  batch_max_content_size: 5000000
+
+confd_path: /etc/datadog-agent/conf.d
+run_path: /opt/datadog-agent/run

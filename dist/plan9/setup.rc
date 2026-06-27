@@ -1,0 +1,176 @@
+#!/bin/rc
+# setup.rc: install the dd-micro-agent as a boot service on a Plan 9 host.
+#
+# Usage:	[SYSNAME=host] rc setup.rc agentbin apikey [site]
+#
+#	agentbin  cross-built plan9 binary: GOOS=plan9 GOARCH=$objtype CGO_ENABLED=0
+#	apikey    Datadog API key, written to a hostowner-only file, never the yaml
+#	site      Datadog site (default datadoghq.eu)
+#	SYSNAME   host whose /cfg/$sysname/{cpurc,termrc} gets the boot hook
+#	          (default: the running sysname from /dev/sysname)
+#	VENTI     venti HTTP address to scrape for disk + server metrics, a dial string
+#	          (tcp!*!PORT) or a full http URL. Default tcp!*!8000. It is probed and
+#	          venti_url is written only if it answers, so non-venti hosts are unaffected.
+#	PROCESS   set PROCESS=1 to enable the opt-in Live Processes agent
+#	          (process_config.process_collection.enabled). Off by default.
+#	TAGS      extra host tags (space-separated) added alongside platform:plan9, e.g.
+#	          TAGS='env:prod role:cpu'. platform:plan9 is always sent so the curated
+#	          "Plan 9" dashboards (which filter {platform:plan9}) populate for this host.
+#
+# Installs the binary to /$objtype/bin/datadog, writes config under /sys/lib/datadog,
+# stores the API key in /sys/lib/datadog/apikey (mode 0600), and adds an idempotent
+# boot hook to /cfg/$sysname/cpurc + /cfg/$sysname/termrc. Run it as the hostowner.
+
+fn usage {
+	echo 'usage: [SYSNAME=host] rc setup.rc agentbin apikey [site]' >[1=2]
+	exit usage
+}
+
+if(! ~ $#* 2 3)
+	usage
+agentbin=$1
+apikey=$2
+site=datadoghq.eu
+if(~ $#* 3)
+	site=$3
+if(~ $#objtype 0)
+	objtype=$cputype
+
+if(! test -f $agentbin){
+	echo setup.rc: no such file: $agentbin >[1=2]
+	exit nobin
+}
+
+bindir=/$objtype/bin
+cfgdir=/sys/lib/datadog
+rundir=/sys/log/datadog
+keyfile=$cfgdir/apikey
+
+# Which host's per-host config gets the boot hook (overridable via $SYSNAME).
+sysname=$SYSNAME
+if(~ $#sysname 0)
+	sysname=`{cat /dev/sysname >[2]/dev/null}
+if(~ $#sysname 0 || ~ $sysname ''){
+	echo 'setup.rc: cannot read /dev/sysname; pass SYSNAME=<host>' >[1=2]
+	exit sysname
+}
+
+# 1. binary -> /$objtype/bin/datadog (reachable as `datadog` via the boot namespace)
+mkdir -p $bindir
+cp $agentbin $bindir/datadog
+chmod +x $bindir/datadog
+echo installed $bindir/datadog
+
+# 2. config -> /sys/lib/datadog (beside /sys/lib/tls). The API key goes in a separate
+#    hostowner-only file (mode 0600). The boot hook reads it into DD_API_KEY, so it
+#    never lands in the world-readable yaml. hostname is left unset so the agent uses
+#    the Plan 9 sysname (#c/sysname, via os.Hostname).
+mkdir -p $cfgdir/conf.d $rundir
+echo -n >$keyfile # created empty and locked down before the key lands (no umask on Plan 9)
+chmod 600 $keyfile
+echo -n $apikey >>$keyfile
+
+# Venti disk + server metrics: probe venti's HTTP /storage page and enable venti_url
+# only when it answers, so non-venti hosts stay quiet. $VENTI overrides the address
+# (default tcp!*!8000). A dial string tcp!host!port maps to http://127.0.0.1:port.
+ventiaddr=$VENTI
+if(~ $#ventiaddr 0 || ~ $ventiaddr '')
+	ventiaddr='tcp!*!8000'
+if(echo $ventiaddr | grep -s '://' >/dev/null)
+	ventiurl=$ventiaddr
+if not {
+	port=`{echo $ventiaddr | awk -F! '{print $NF}'}
+	if(~ $port http)
+		port=80
+	ventiurl='http://127.0.0.1:'^$port
+}
+ventiline='#venti_url: '^$ventiurl^'   # this host runs venti? set VENTI=tcp!*!PORT and re-run'
+# Probe a few times: venti can be slow to answer right after boot, and a single missed
+# probe would silently leave venti_url commented (so the disk/venti dashboard panels stay
+# blank with no hint why). rc has no `break`, so a length test on $ventiok stops probing
+# once it has answered.
+ventiok=()
+for(i in 1 2 3){
+	if(~ $#ventiok 0 && hget $ventiurl/storage >[2]/dev/null | grep -s 'total space=' >/dev/null)
+		ventiok=yes
+	if(~ $#ventiok 0)
+		sleep 1
+}
+if(~ $ventiok yes){
+	ventiline='venti_url: '^$ventiurl
+	echo 'venti detected at '^$ventiurl^', enabling venti metrics'
+}
+if not
+	echo 'no venti at '^$ventiurl^' (probed 3x), venti_url left commented (set VENTI=tcp!*!PORT to point elsewhere)'
+
+# Live Processes (opt-in): PROCESS=1 turns on the process agent, which posts the full
+# process list to process.<site>. Off by default (it adds steady CollectorProc/RealTime
+# traffic), so it is enabled only when asked. A dial string is not needed. The intake
+# URL derives from $site (process.<site>).
+procpfx='#'
+proctip='   # set PROCESS=1 and re-run to enable Live Processes'
+if(~ $PROCESS 1){
+	procpfx=''
+	proctip=''
+	echo 'PROCESS=1, enabling Live Processes (process agent)'
+}
+if not
+	echo 'no PROCESS=1. Live Processes left disabled (set PROCESS=1 to enable)'
+
+# Host tags. platform:plan9 is the tag the curated "Plan 9" dashboards filter on. Datadog
+# does NOT derive a metric tag from the metadata platform, so the agent must send it as a
+# real host tag (datadog.yaml tags: → appended to every serie) or every {platform:plan9}
+# dashboard widget reads "No data". $TAGS (space-separated) appends extra host tags.
+hosttags=(platform:plan9 `{echo $TAGS})
+
+{
+	echo '# api_key is read from DD_API_KEY; the boot hook sets it from '$keyfile
+	echo 'site: '$site
+	echo 'logs_enabled: true'
+	echo 'enable_metadata_collection: true'
+	echo 'confd_path: '$cfgdir/conf.d
+	echo 'run_path: '$rundir
+	echo 'tags:'
+	for(t in $hosttags)
+		echo '  - '^$t
+	echo $ventiline
+	echo $procpfx^'process_config:'^$proctip
+	echo $procpfx^'  process_collection:'
+	echo $procpfx^'    enabled: true'
+} >$cfgdir/datadog.yaml
+{
+	echo 'logs:'
+	echo '  - {type: file, path: /sys/log/*,       service: plan9, source: plan9}'
+	echo '  - {type: file, path: /sys/log/httpd/*, service: httpd, source: nginx}'
+} >$cfgdir/conf.d/plan9.yaml
+echo wrote $cfgdir/datadog.yaml $cfgdir/conf.d/plan9.yaml
+
+# 3. TLS roots: Go's crypto/x509 reads /sys/lib/tls/ca.pem on plan9.
+if(! test -f /sys/lib/tls/ca.pem)
+	echo 'warning: /sys/lib/tls/ca.pem missing. Add current roots, or set skip_ssl_validation: true in datadog.yaml' >[1=2]
+
+# 4. boot hook (idempotent) in the per-host config /cfg/$sysname. A cpu server sources
+#    /cfg/$sysname/cpurc. A terminal, /cfg/$sysname/termrc. The entry lies dormant in
+#    whichever the host does not boot, so adding to both is safe and role-independent.
+#    The key is read from the 0600 file at boot (cpurc/termrc run as the hostowner).
+cfgsys=/cfg/$sysname
+mkdir -p $cfgsys
+start='DD_API_KEY=`{cat '$keyfile'} '$bindir'/datadog -cfgpath '$cfgdir'/datadog.yaml >>'$rundir'/agent.log >[2=1] &'
+for(f in $cfgsys/cpurc $cfgsys/termrc){
+	if(! test -e $f){
+		echo '#!/bin/rc' >$f
+		chmod +x $f
+	}
+	if(! grep '^# datadog-agent$' $f >/dev/null >[2]/dev/null){
+		echo			>>$f
+		echo '# datadog-agent'	>>$f
+		echo $start		>>$f
+		echo 'added boot hook to '$f
+	}
+	if not
+		echo 'boot hook already in '$f
+}
+
+echo
+echo 'setup complete. start it now without rebooting:'
+echo '	'$start

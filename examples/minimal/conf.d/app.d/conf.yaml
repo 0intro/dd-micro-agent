@@ -1,0 +1,8 @@
+# File log source. Deploy as /etc/datadog-agent/conf.d/app.d/conf.yaml.
+logs:
+  - type: file
+    path: /var/log/app/app.log
+    service: app
+    source: app
+    tags:
+      - env:prod

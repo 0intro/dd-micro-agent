@@ -1,0 +1,53 @@
+[Unit]
+Description=dd-micro-agent (metrics, logs, and host metadata for the Datadog backend)
+Documentation=https://github.com/0intro/dd-micro-agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=dd-agent
+Group=dd-agent
+# adm reads the root:adm files under /var/log, systemd-journal lets a
+# type: journald log source read the journal through journalctl.
+SupplementaryGroups=adm systemd-journal
+EnvironmentFile=-/etc/datadog-agent/environment
+ExecStart=/opt/datadog-agent/bin/agent -cfgpath /etc/datadog-agent/datadog.yaml
+Restart=on-failure
+RestartSec=5
+
+# The registry.json offsets under run_path are the only thing the agent writes.
+ReadWritePaths=/opt/datadog-agent/run
+
+# Sandboxing. ProtectProc and ProcSubset are left at their defaults on purpose:
+# the agent reads /proc/<pid> for Live Processes and /proc/{stat,meminfo,...}
+# for host metrics, both of which the stricter settings would hide.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_NETLINK is kept because Go's net stack uses it for local lookups. The agent
+# never binds a privileged port, so the bounding set stays empty.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

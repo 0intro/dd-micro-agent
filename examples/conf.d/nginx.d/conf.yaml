@@ -1,0 +1,16 @@
+# Example integration config: tail two nginx log files.
+# Only `logs:` entries with type "file" are used. Other keys are ignored.
+logs:
+  - type: file
+    path: /var/log/nginx/access.log
+    service: nginx
+    source: nginx
+    tags:
+      - team:web
+
+  - type: file
+    path: /var/log/nginx/error.log
+    service: nginx
+    source: nginx
+    tags:
+      - team:web

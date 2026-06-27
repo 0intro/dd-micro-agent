@@ -1,0 +1,256 @@
+name: e2e (nightly)
+
+# Heavy VM end-to-end tests against the local fake intake (e2e/parity), so no
+# Datadog API keys and no pup are needed. The scripts self-provision their VM
+# images and clones (download-if-absent), so the same script runs locally and
+# here. The pup + real-Datadog verification path stays manual (see e2e/README.md).
+#
+# Jobs: parity (Fedora), vm_linux (Fedora), vm_freebsd, vm_openbsd, vm_netbsd,
+# vm_dragonfly, vm_plan9 (clones github.com/0intro/9legacy), and mac (a native run
+# on a macOS runner). All run on the nightly schedule and under suite=all.
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 04:00 UTC nightly, on the default branch
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: which suite to run
+        type: choice
+        default: all
+        options: [all, parity, vm_linux, vm_freebsd, vm_openbsd, vm_netbsd, vm_dragonfly, vm_plan9, mac, parity_mac]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per suite, so manually dispatched suites run in parallel; two nightlies still serialize.
+  group: e2e-${{ github.ref }}-${{ inputs.suite || 'nightly' }}
+  cancel-in-progress: false # let a long VM run finish rather than killing it
+
+env:
+  FEDORA_VER: '44'
+  # Pin the exact Fedora Cloud Base build. The spin suffix changes per release, so
+  # update this (and FEDORA_VER) when the download 404s.
+  FEDORA_IMG_URL: https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+
+jobs:
+  parity:
+    # Compares our agent's wire payloads against the stock Datadog Agent (dnf) side by side in
+    # a Fedora VM; Linux-only, since the stock agent installs only via the Linux package repos.
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'parity' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils xorriso
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/fedora-img
+          key: fedora-cloud-${{ env.FEDORA_VER }}-v1
+      - name: parity
+        run: e2e/parity.sh
+
+  vm_linux:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_linux' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60 # nested KVM is slow, and the first run also downloads the Fedora image
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils xorriso
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/fedora-img
+          key: fedora-cloud-${{ env.FEDORA_VER }}-v1
+      - name: vm_linux
+        run: e2e/vm_linux.sh # DD_API_KEY unset, so fake-intake mode
+
+  vm_freebsd:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_freebsd' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60 # nested KVM is slow, and the first run also downloads the FreeBSD image
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils xz-utils xorriso
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/freebsd-img
+          key: freebsd-img-15.1 # matches IMG_VER in e2e/vm_freebsd.sh, bump together
+      - name: vm_freebsd
+        run: e2e/vm_freebsd.sh # DD_API_KEY unset, so fake-intake mode
+
+  vm_openbsd:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_openbsd' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90 # the first run does a full unattended autoinstall. The cache makes later runs boot-only
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils expect socat python3
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/openbsd-img # cached installed qcow2 + the baked SSH key
+          key: openbsd-img-7.9 # matches VER in e2e/vm_openbsd.sh, bump together
+      - name: vm_openbsd
+        run: e2e/vm_openbsd.sh # DD_API_KEY unset, so fake-intake mode
+
+  vm_netbsd:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_netbsd' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60 # nested KVM is slow, and the first run also downloads the live image
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils expect socat python3 gzip
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/netbsd-img
+          key: netbsd-img-10.1 # matches VER in e2e/vm_netbsd.sh, bump together
+      - name: vm_netbsd
+        run: e2e/vm_netbsd.sh # DD_API_KEY unset, so fake-intake mode
+
+  vm_dragonfly:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_dragonfly' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60 # nested KVM is slow, and the first run also downloads the DragonFly image
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils expect socat python3 bzip2
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/dragonfly-img
+          key: dragonfly-img-6.4.2 # matches DFLY_VER in e2e/vm_dragonfly.sh, bump together
+      - name: vm_dragonfly
+        run: e2e/vm_dragonfly.sh # DD_API_KEY unset, so fake-intake mode
+
+  vm_plan9:
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'vm_plan9' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75 # nested KVM is slow, and the first run clones 9legacy and runs boot/getbin
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: enable + confirm KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils expect \
+            build-essential libx11-dev libxext-dev libxt-dev libfontconfig1-dev
+      - name: cache plan9port
+        id: p9p
+        uses: actions/cache@v6
+        with:
+          path: ~/plan9
+          key: plan9port-noble-v2
+      - name: build plan9port (9p + 9660srv for boot/getbin; not packaged on noble)
+        if: steps.p9p.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/9fans/plan9port ~/plan9
+          cd ~/plan9 && ./INSTALL -b
+      - name: plan9port env
+        run: echo "PLAN9=$HOME/plan9" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/plan9-9legacy
+          key: plan9-9legacy-v1
+      - name: vm_plan9
+        run: PATH="$PATH:$PLAN9/bin" e2e/vm_plan9.sh # DD_API_KEY unset, so fake-intake mode
+
+  mac:
+    # Runs the agent natively on the runner (real Apple hardware), no VM, since macOS cannot
+    # be virtualized off Apple hardware. Free on this public repo, so it joins the nightly.
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'mac' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: mac
+        run: e2e/mac.sh # DD_API_KEY unset, so fake-intake mode
+
+  parity_mac:
+    # Runs the stock Datadog Agent (from the official DMG) next to ours on real Apple hardware
+    # and diffs their payloads on the macOS-reduced surface (no process-agent; -platform darwin).
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'parity_mac' }}
+    runs-on: macos-15
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: parity_mac
+        run: e2e/parity_mac.sh # DD_API_KEY unset, so fake-intake mode
